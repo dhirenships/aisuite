@@ -1,6 +1,9 @@
 """
 Langfuse integration for aisuite logging.
 This module provides enhanced observability by integrating Langfuse tracing with aisuite's logging.
+
+Supports reasoning tokens tracking for AI models that use internal reasoning (e.g., OpenAI's o-series models).
+Reasoning tokens are properly extracted from API responses and included in Langfuse metadata.
 """
 
 import os
@@ -142,6 +145,9 @@ class LangfuseIntegration:
             # Extract response content and debug metadata
             output = self._extract_response_content(response)
             debug_meta = self._extract_debug_metadata(response)
+            
+            # Extract usage data including reasoning tokens
+            usage_data = self._extract_usage_data(response)
 
             trace.update(
                 output=output,
@@ -150,11 +156,14 @@ class LangfuseIntegration:
             )
 
             # Add execution time and debug metadata
+            metadata_update = {
+                "execution_time_seconds": execution_time,
+                **({"debug": debug_meta} if debug_meta else {})
+            }
+
             trace.update(
-                metadata={
-                    "execution_time_seconds": execution_time,
-                    **({"debug": debug_meta} if debug_meta else {})
-                }
+                metadata=metadata_update,
+                **({"usage": usage_data} if usage_data else {})
             )
 
             # End the span
@@ -162,6 +171,78 @@ class LangfuseIntegration:
 
         except Exception as e:
             print(f"Failed to update Langfuse span: {e}")
+
+    def _extract_usage_data(self, response: Any) -> Optional[Dict[str, Any]]:
+        """Extract usage data from the response, including reasoning tokens.
+        
+        Returns usage data in the format compatible with Langfuse:
+        {
+            "input_tokens": int,
+            "output_tokens": int,
+            "total_tokens": int,
+            "input_tokens_details": {
+                "cached_tokens": int
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": int
+            }
+        }
+        """
+        try:
+            usage = getattr(response, 'usage', None)
+            if not usage:
+                return None
+            
+            # Convert usage to dict if it's an object
+            usage_dict = usage.dict() if hasattr(usage, 'dict') else (usage if isinstance(usage, dict) else {})
+            if not usage_dict:
+                return None
+            
+            # Initialize usage data structure
+            usage_data: Dict[str, Any] = {}
+            
+            # Map prompt_tokens to input_tokens
+            input_tokens = usage_dict.get('prompt_tokens') or usage_dict.get('input_tokens')
+            if input_tokens is not None:
+                usage_data["input_tokens"] = input_tokens
+            
+            # Map completion_tokens to output_tokens
+            output_tokens = usage_dict.get('completion_tokens') or usage_dict.get('output_tokens')
+            if output_tokens is not None:
+                usage_data["output_tokens"] = output_tokens
+            
+            # Extract total_tokens
+            total_tokens = usage_dict.get('total_tokens')
+            if total_tokens is not None:
+                usage_data["total_tokens"] = total_tokens
+            
+            # Extract and map input_tokens_details (prompt_tokens_details)
+            input_details = usage_dict.get('prompt_tokens_details') or usage_dict.get('input_tokens_details')
+            if input_details:
+                input_details_dict = input_details.dict() if hasattr(input_details, 'dict') else (input_details if isinstance(input_details, dict) else {})
+                input_tokens_details = {}
+                cached_tokens = input_details_dict.get('cached_tokens')
+                if cached_tokens is not None and cached_tokens > 0:
+                    input_tokens_details["cached_tokens"] = cached_tokens
+                if input_tokens_details:
+                    usage_data["input_tokens_details"] = input_tokens_details
+            
+            # Extract and map completion_tokens_details (output_tokens_details)
+            completion_details = usage_dict.get('completion_tokens_details') or usage_dict.get('output_tokens_details')
+            if completion_details:
+                completion_details_dict = completion_details.dict() if hasattr(completion_details, 'dict') else (completion_details if isinstance(completion_details, dict) else {})
+                output_tokens_details = {}
+                reasoning_tokens = completion_details_dict.get('reasoning_tokens')
+                if reasoning_tokens is not None and reasoning_tokens > 0:
+                    output_tokens_details["reasoning_tokens"] = reasoning_tokens
+                if output_tokens_details:
+                    usage_data["output_tokens_details"] = output_tokens_details
+            
+            return usage_data if usage_data else None
+            
+        except Exception as e:
+            print(f"Failed to extract usage data: {e}")
+            return None
 
     def _extract_response_content(self, response: Any) -> Dict[str, Any]:
         """Extract meaningful content from the response for Langfuse."""
